@@ -1,9 +1,27 @@
 // src/main.js
 import Parser from "rss-parser";
 import nodemailer from "nodemailer";
+import fetch from "node-fetch"; // ★ 追加：Google News RSS 403/429対策でfetch経由にする
+
+// =========================
+// 0) 実行環境・挙動設定（必要なら env で上書き可）
+// =========================
+const CONFIG = {
+  LIMIT_PER_COMPANY: Number(process.env.LIMIT_PER_COMPANY || 3),
+  // 何も取れなかった時にメールを送るか（false推奨）
+  SEND_IF_EMPTY: (process.env.SEND_IF_EMPTY || "false").toLowerCase() === "true",
+  // HTMLメールも送る（true推奨）
+  SEND_HTML: (process.env.SEND_HTML || "true").toLowerCase() === "true",
+  // RSSの取得リトライ回数
+  RSS_RETRY: Number(process.env.RSS_RETRY || 2),
+  // RSSのタイムアウト(ms)
+  RSS_TIMEOUT_MS: Number(process.env.RSS_TIMEOUT_MS || 20000),
+  // JST表示
+  TZ: process.env.TZ || "Asia/Tokyo",
+};
 
 const parser = new Parser({
-  timeout: 20000,
+  timeout: CONFIG.RSS_TIMEOUT_MS,
   headers: { "User-Agent": "NewsBot/1.0" },
 });
 
@@ -25,7 +43,7 @@ const FEEDS = [
 // 必須ワード
 const REQUIRED = ["塗料", "コーティング", "塗装", "paint", "coating"];
 
-// 市場調査/レポート系は除外（あなたのログで多かったので強め）
+// 市場調査/レポート系は除外
 const EXCLUDE = [
   "市場調査",
   "市場規模",
@@ -65,9 +83,55 @@ function dedupeByLink(items) {
     return true;
   });
 }
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
-async function fetchLatest(feed, limit = 3) {
-  const parsed = await parser.parseURL(feed.url);
+// =========================
+// ★ 追加：Google News RSS を fetch→parseString で取得（403/429対策）
+// =========================
+async function fetchRssXml(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.RSS_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; NewsBot/1.0)",
+        Accept: "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+      },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`RSS fetch failed: ${res.status} ${res.statusText}`);
+    }
+    return await res.text();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function parseFeedWithRetry(url, retries = CONFIG.RSS_RETRY) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const xml = await fetchRssXml(url);
+      return await parser.parseString(xml);
+    } catch (e) {
+      lastErr = e;
+      const msg = e?.message || String(e);
+      console.log(`RSS retry ${i + 1}/${retries + 1} failed: ${msg}`);
+      // 429/一時障害っぽい時は少し待つ
+      await sleep(800 * (i + 1));
+    }
+  }
+  throw lastErr;
+}
+
+async function fetchLatest(feed, limit = CONFIG.LIMIT_PER_COMPANY) {
+  // ★ 変更：parser.parseURL(feed.url) → fetch+parseString
+  const parsed = await parseFeedWithRetry(feed.url);
 
   let items = (parsed.items || [])
     .map((it) => ({
@@ -91,7 +155,7 @@ async function fetchLatest(feed, limit = 3) {
 }
 
 function buildEmailText(resultsByCompany) {
-  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
 
   let body = `塗料業界ニュース（自動配信）\n${nowJST}\n\n`;
 
@@ -112,17 +176,77 @@ function buildEmailText(resultsByCompany) {
   return body;
 }
 
-async function sendMailOrLog(bodyText) {
+// ★ 追加：HTMLメールも作る（見やすい＆改行崩れ防止）
+function escapeHtml(s) {
+  return (s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function buildEmailHtml(resultsByCompany) {
+  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
+
+  const sections = resultsByCompany
+    .map((r) => {
+      if (!r.items.length) {
+        return `<h3 style="margin:16px 0 6px;">■ ${escapeHtml(r.company)}</h3><div>(該当なし)</div>`;
+      }
+
+      const lis = r.items
+        .map((it, idx) => {
+          const d = it.date.toISOString();
+          return `
+            <li style="margin:10px 0;">
+              <div><b>[${idx + 1}] ${escapeHtml(it.title)}</b></div>
+              <div style="font-size:12px; color:#555;">${escapeHtml(d)}</div>
+              <div><a href="${escapeHtml(it.link)}">${escapeHtml(it.link)}</a></div>
+            </li>
+          `;
+        })
+        .join("");
+
+      return `<h3 style="margin:16px 0 6px;">■ ${escapeHtml(r.company)}</h3><ul style="padding-left:18px; margin-top:6px;">${lis}</ul>`;
+    })
+    .join("");
+
+  return `
+    <div style="font-family: Arial, Helvetica, sans-serif; line-height:1.5;">
+      <div style="font-size:18px; font-weight:700;">塗料業界ニュース（自動配信）</div>
+      <div style="color:#666; margin:6px 0 14px;">${escapeHtml(nowJST)}</div>
+      ${sections}
+      <hr style="margin:18px 0; border:none; border-top:1px solid #ddd;" />
+      <div style="font-size:12px; color:#888;">Sent by GitHub Actions</div>
+    </div>
+  `;
+}
+
+function countAllItems(resultsByCompany) {
+  return resultsByCompany.reduce((sum, r) => sum + (r.items?.length || 0), 0);
+}
+
+async function sendMailOrLog(bodyText, bodyHtml, totalItems) {
   const { SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
 
-  // まず Secrets が渡っているかをログで確認（値は出さない）
+  // Secrets チェック（値は出さない）
   console.log("SMTP_USER set:", !!SMTP_USER);
   console.log("SMTP_PASS set:", !!SMTP_PASS);
-  console.log("MAIL_TO:", MAIL_TO || "(empty)");
-  console.log("MAIL_FROM:", MAIL_FROM || "(empty)");
+  console.log("MAIL_TO set:", !!MAIL_TO);
+  console.log("MAIL_FROM set:", !!MAIL_FROM);
+  console.log("Total items:", totalItems);
+  console.log("SEND_IF_EMPTY:", CONFIG.SEND_IF_EMPTY);
+  console.log("SEND_HTML:", CONFIG.SEND_HTML);
 
   if (!SMTP_USER || !SMTP_PASS || !MAIL_TO || !MAIL_FROM) {
     console.log("SMTP secrets missing -> skip email sending.");
+    return;
+  }
+
+  // 0件なら送らない（スパム化防止）
+  if (!CONFIG.SEND_IF_EMPTY && totalItems === 0) {
+    console.log("No news items -> skip email sending (SEND_IF_EMPTY=false).");
     return;
   }
 
@@ -133,18 +257,26 @@ async function sendMailOrLog(bodyText) {
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
 
-  await transporter.sendMail({
+  const mail = {
     from: MAIL_FROM,
     to: MAIL_TO,
     subject: "塗料業界ニュース（GitHub Actions）",
     text: bodyText,
-  });
+  };
+
+  if (CONFIG.SEND_HTML) {
+    mail.html = bodyHtml;
+  }
+
+  await transporter.sendMail(mail);
 
   console.log("Email successfully sent to:", MAIL_TO);
 }
 
 async function main() {
   console.log("=== Paint Industry News Bot (RSS + Email) ===");
+  console.log("Node:", process.version);
+  console.log("TZ:", CONFIG.TZ);
 
   const resultsByCompany = [];
 
@@ -154,7 +286,7 @@ async function main() {
     console.log(`RSS: ${feed.url}`);
 
     try {
-      const items = await fetchLatest(feed, 3);
+      const items = await fetchLatest(feed, CONFIG.LIMIT_PER_COMPANY);
       resultsByCompany.push({ company: feed.name, items });
 
       console.log(`Fetched ${items.length} items. Showing latest ${items.length}.`);
@@ -169,8 +301,12 @@ async function main() {
     }
   }
 
+  const totalItems = countAllItems(resultsByCompany);
+
   const emailText = buildEmailText(resultsByCompany);
-  await sendMailOrLog(emailText);
+  const emailHtml = buildEmailHtml(resultsByCompany);
+
+  await sendMailOrLog(emailText, emailHtml, totalItems);
 
   console.log("\nDone.");
 }
@@ -179,3 +315,4 @@ main().catch((err) => {
   console.error("FATAL:", err?.message || err);
   process.exit(1);
 });
+
