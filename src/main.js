@@ -1,18 +1,14 @@
 // src/main.js
-// Step1 final: Per-company latest 3 news (sorted by date, deduped)
+// Per-company latest 3 news (date desc). No mixed "Top 10" section.
 
 import Parser from "rss-parser";
 
 const parser = new Parser({
   timeout: 20000,
-  headers: {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NewsBot/1.0",
-  },
+  headers: { "User-Agent": "NewsBot/1.0" },
 });
 
-/* =========================
-   Company RSS definitions
-   ========================= */
+// 会社ごとのRSS（必要ならURLはあなたのものに合わせてOK）
 const FEEDS = [
   {
     name: "関西ペイント",
@@ -28,12 +24,11 @@ const FEEDS = [
   },
 ];
 
-/* =========================
-   Filtering rules
-   ========================= */
-const REQUIRED_KEYWORDS = ["塗料", "コーティング", "塗装", "paint", "coating"];
+// 必須ワード（ここに当たらない記事は捨てる）
+const REQUIRED = ["塗料", "コーティング", "塗装", "paint", "coating"];
 
-const EXCLUDE_KEYWORDS = [
+// 市場調査/レポート系を強めに除外（ログで混ざってたので増やしています）
+const EXCLUDE = [
   "市場調査",
   "市場規模",
   "レポート",
@@ -41,61 +36,64 @@ const EXCLUDE_KEYWORDS = [
   "シェア",
   "予測",
   "見通し",
+  "成長分析",
+  "需要",
+  "トレンド",
+  "CAGR",
   "market",
   "report",
+  "forecast",
+  "size",
+  "share",
 ];
 
-function normalize(text) {
-  return (text || "").toLowerCase().trim();
+function norm(s) {
+  return (s || "").toLowerCase().trim();
 }
-
 function containsAny(text, keywords) {
-  const t = normalize(text);
-  return keywords.some((k) => t.includes(normalize(k)));
+  const t = norm(text);
+  return keywords.some((k) => t.includes(norm(k)));
 }
-
 function toDate(d) {
   const dt = new Date(d);
-  return isNaN(dt.getTime()) ? null : dt;
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
-
-/* =========================
-   Core logic
-   ========================= */
-async function fetchCompanyNews(feed) {
-  const parsed = await parser.parseURL(feed.url);
-
-  // 1. 整形
-  let items = (parsed.items || []).map((it) => ({
-    company: feed.name,
-    title: it.title?.trim() || "",
-    link: it.link?.trim() || "",
-    date: toDate(it.pubDate || it.isoDate),
-  }));
-
-  // 2. 基本フィルタ
-  items = items.filter(
-    (x) =>
-      x.title &&
-      x.link &&
-      x.date &&
-      containsAny(x.title, REQUIRED_KEYWORDS) &&
-      !containsAny(x.title, EXCLUDE_KEYWORDS)
-  );
-
-  // 3. 重複排除（同一会社内）
+function dedupeByLink(items) {
   const seen = new Set();
-  items = items.filter((x) => {
-    const key = normalize(x.link);
-    if (seen.has(key)) return false;
+  return items.filter((x) => {
+    const key = norm(x.link) || norm(x.title);
+    if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
 
-  // 4. 日付降順
+async function fetchLatest3(feed) {
+  const parsed = await parser.parseURL(feed.url);
+
+  let items = (parsed.items || [])
+    .map((it) => ({
+      company: feed.name,
+      title: (it.title || "").trim(),
+      link: (it.link || "").trim(),
+      date: toDate(it.pubDate || it.isoDate),
+    }))
+    .filter((x) => x.title && x.link && x.date);
+
+  // フィルタ
+  items = items.filter((x) => {
+    if (!containsAny(x.title, REQUIRED)) return false;
+    if (containsAny(x.title, EXCLUDE)) return false;
+    return true;
+  });
+
+  // 同一会社内の重複排除
+  items = dedupeByLink(items);
+
+  // 日付の新しい順
   items.sort((a, b) => b.date - a.date);
 
-  // 5. 最新3件のみ
+  // 最新3件だけ
   return items.slice(0, 3);
 }
 
@@ -107,20 +105,20 @@ async function main() {
     console.log(`■ ${feed.name}`);
 
     try {
-      const news = await fetchCompanyNews(feed);
+      const top3 = await fetchLatest3(feed);
 
-      if (news.length === 0) {
-        console.log("No relevant news found.");
+      if (top3.length === 0) {
+        console.log("No items (after filtering).");
         continue;
       }
 
-      news.forEach((n, i) => {
+      top3.forEach((n, i) => {
         console.log(`\n[${i + 1}] ${n.title}`);
         console.log(`  Date: ${n.date.toISOString()}`);
         console.log(`  URL : ${n.link}`);
       });
-    } catch (err) {
-      console.log(`ERROR: ${err.message}`);
+    } catch (e) {
+      console.log(`ERROR: ${e?.message || e}`);
     }
   }
 
@@ -128,6 +126,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("FATAL:", err.message);
+  console.error("FATAL:", err?.message || err);
   process.exit(1);
 });
