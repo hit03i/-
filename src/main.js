@@ -316,3 +316,38 @@ main().catch((err) => {
   process.exit(1);
 });
 
+const { SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
+
+console.log("SMTP_USER set:", !!SMTP_USER);
+console.log("SMTP_PASS set:", !!SMTP_PASS);
+console.log("MAIL_TO:", MAIL_TO || "(empty)");
+console.log("MAIL_FROM:", MAIL_FROM || "(empty)");
+
+if (!SMTP_USER || !SMTP_PASS || !MAIL_TO || !MAIL_FROM) {
+  console.log("SMTP secrets missing -> skip email sending.");
+} else {
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+
+  const lines = (allItems || [])
+    .slice(0, 10)
+    .map((it, i) => `[${i + 1}] ${it.title}\n${it.date?.toISOString?.() || ""}\n${it.link}\n`)
+    .join("\n");
+
+  const body = `塗料業界ニュース（GitHub Actions）\n${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}\n\n${lines}`;
+
+  await transporter.sendMail({
+    from: MAIL_FROM,
+    to: MAIL_TO,
+    subject: "塗料業界ニュース（GitHub Actions）",
+    text: body,
+  });
+
+  console.log("Email successfully sent to:", MAIL_TO);
+}
+// 
+
