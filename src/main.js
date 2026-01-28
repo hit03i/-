@@ -1,4 +1,2 @@
 console.log("Paint Industry News Bot started");
-
-const now = new Date().toISOString();
-console.log("Current time:", now);
+console.log("Current time:", new Date().toISOString());
