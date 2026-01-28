@@ -1,8 +1,5 @@
 // src/main.js
-// Step1 (deduped): Multi-company Google News RSS -> filter + dedupe
-// - Dedup FEEDS by (name + url) so the same company won't appear twice
-// - Dedup items per company by canonical key (link || title)
-// - Exclude market-report noise, and boost auto/anticorrosion/building topics
+// Step1 final: Per-company latest 3 news (sorted by date, deduped)
 
 import Parser from "rss-parser";
 
@@ -13,37 +10,124 @@ const parser = new Parser({
   },
 });
 
-const FEEDS_RAW = [
+/* =========================
+   Company RSS definitions
+   ========================= */
+const FEEDS = [
   {
     name: "関西ペイント",
-    url: "https://news.google.com/rss/search?q=(%E9%96%A2%E8%A5%BF%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Kansai%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)%20-%E5%B8%82%E5%A0%B4%20-%E8%AA%BF%E6%9F%BB%20-%E3%83%AC%E3%83%9D%E3%83%BC%E3%83%88%20-%E3%83%A9%E3%83%B3%E3%82%AD%E3%83%B3%E3%82%B0%20-%E4%BA%88%E6%B8%AC%20-%E8%A6%8B%E9%80%9A%E3%81%97&hl=ja&gl=JP&ceid=JP:ja",
+    url: "https://news.google.com/rss/search?q=(%E9%96%A2%E8%A5%BF%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Kansai%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)&hl=ja&gl=JP&ceid=JP:ja",
   },
   {
     name: "日本ペイント",
-    url: "https://news.google.com/rss/search?q=(%E6%97%A5%E6%9C%AC%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Nippon%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)%20-%E5%B8%82%E5%A0%B4%20-%E8%AA%BF%E6%9F%BB%20-%E3%83%AC%E3%83%9D%E3%83%BC%E3%83%88%20-%E3%83%A9%E3%83%B3%E3%82%AD%E3%83%B3%E3%82%B0%20-%E4%BA%88%E6%B8%AC%20-%E8%A6%8B%E9%80%9A%E3%81%97&hl=ja&gl=JP&ceid=JP:ja",
+    url: "https://news.google.com/rss/search?q=(%E6%97%A5%E6%9C%AC%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Nippon%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)&hl=ja&gl=JP&ceid=JP:ja",
   },
   {
     name: "BASF",
-    url: "https://news.google.com/rss/search?q=(BASF%20Coatings%20OR%20BASF%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20BASF)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)%20-%E5%B8%82%E5%A0%B4%20-%E8%AA%BF%E6%9F%BB%20-%E3%83%AC%E3%83%9D%E3%83%BC%E3%83%88%20-%E3%83%A9%E3%83%B3%E3%82%AD%E3%83%B3%E3%82%B0%20-%E4%BA%88%E6%B8%AC%20-%E8%A6%8B%E9%80%9A%E3%81%97&hl=ja&gl=JP&ceid=JP:ja",
+    url: "https://news.google.com/rss/search?q=(BASF%20Coatings%20OR%20BASF)%20(%E5%A1%97%E6%96%99%20OR%20%E3%82%B3%E3%83%BC%E3%83%86%E3%82%A3%E3%83%B3%E3%82%B0%20OR%20%E5%A1%97%E8%A3%85%20OR%20paint%20OR%20coating)&hl=ja&gl=JP&ceid=JP:ja",
   },
 ];
 
-// 必須：塗料/コーティング/塗装関連
-const REQUIRED_TOPIC_KEYWORDS = ["塗料", "コーティング", "塗装", "paint", "coating"];
+/* =========================
+   Filtering rules
+   ========================= */
+const REQUIRED_KEYWORDS = ["塗料", "コーティング", "塗装", "paint", "coating"];
 
-// 優先：自動車/防食/建築（スコアで上に）
-const PREFERRED_DOMAIN_KEYWORDS = [
-  "自動車",
-  "自動車塗料",
-  "車体",
-  "OEM",
-  "防食",
-  "重防食",
-  "防錆",
-  "耐食",
-  "橋梁",
-  "鋼構造",
-  "船舶",
-  "建築",
-  "外壁",
-  "内装",
+const EXCLUDE_KEYWORDS = [
+  "市場調査",
+  "市場規模",
+  "レポート",
+  "ランキング",
+  "シェア",
+  "予測",
+  "見通し",
+  "market",
+  "report",
+];
+
+function normalize(text) {
+  return (text || "").toLowerCase().trim();
+}
+
+function containsAny(text, keywords) {
+  const t = normalize(text);
+  return keywords.some((k) => t.includes(normalize(k)));
+}
+
+function toDate(d) {
+  const dt = new Date(d);
+  return isNaN(dt.getTime()) ? null : dt;
+}
+
+/* =========================
+   Core logic
+   ========================= */
+async function fetchCompanyNews(feed) {
+  const parsed = await parser.parseURL(feed.url);
+
+  // 1. 整形
+  let items = (parsed.items || []).map((it) => ({
+    company: feed.name,
+    title: it.title?.trim() || "",
+    link: it.link?.trim() || "",
+    date: toDate(it.pubDate || it.isoDate),
+  }));
+
+  // 2. 基本フィルタ
+  items = items.filter(
+    (x) =>
+      x.title &&
+      x.link &&
+      x.date &&
+      containsAny(x.title, REQUIRED_KEYWORDS) &&
+      !containsAny(x.title, EXCLUDE_KEYWORDS)
+  );
+
+  // 3. 重複排除（同一会社内）
+  const seen = new Set();
+  items = items.filter((x) => {
+    const key = normalize(x.link);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // 4. 日付降順
+  items.sort((a, b) => b.date - a.date);
+
+  // 5. 最新3件のみ
+  return items.slice(0, 3);
+}
+
+async function main() {
+  console.log("=== Paint Industry News Bot (per company latest 3) ===");
+
+  for (const feed of FEEDS) {
+    console.log("\n----------------------------------------");
+    console.log(`■ ${feed.name}`);
+
+    try {
+      const news = await fetchCompanyNews(feed);
+
+      if (news.length === 0) {
+        console.log("No relevant news found.");
+        continue;
+      }
+
+      news.forEach((n, i) => {
+        console.log(`\n[${i + 1}] ${n.title}`);
+        console.log(`  Date: ${n.date.toISOString()}`);
+        console.log(`  URL : ${n.link}`);
+      });
+    } catch (err) {
+      console.log(`ERROR: ${err.message}`);
+    }
+  }
+
+  console.log("\nDone.");
+}
+
+main().catch((err) => {
+  console.error("FATAL:", err.message);
+  process.exit(1);
+});
