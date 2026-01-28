@@ -1,14 +1,12 @@
 // src/main.js
-// Per-company latest 3 news (date desc). No mixed "Top 10" section.
-
 import Parser from "rss-parser";
+import nodemailer from "nodemailer";
 
 const parser = new Parser({
   timeout: 20000,
   headers: { "User-Agent": "NewsBot/1.0" },
 });
 
-// 会社ごとのRSS（必要ならURLはあなたのものに合わせてOK）
 const FEEDS = [
   {
     name: "関西ペイント",
@@ -24,10 +22,10 @@ const FEEDS = [
   },
 ];
 
-// 必須ワード（ここに当たらない記事は捨てる）
+// 必須ワード
 const REQUIRED = ["塗料", "コーティング", "塗装", "paint", "coating"];
 
-// 市場調査/レポート系を強めに除外（ログで混ざってたので増やしています）
+// 市場調査/レポート系は除外（あなたのログで多かったので強め）
 const EXCLUDE = [
   "市場調査",
   "市場規模",
@@ -68,7 +66,7 @@ function dedupeByLink(items) {
   });
 }
 
-async function fetchLatest3(feed) {
+async function fetchLatest(feed, limit = 3) {
   const parsed = await parser.parseURL(feed.url);
 
   let items = (parsed.items || [])
@@ -87,40 +85,92 @@ async function fetchLatest3(feed) {
     return true;
   });
 
-  // 同一会社内の重複排除
   items = dedupeByLink(items);
-
-  // 日付の新しい順
   items.sort((a, b) => b.date - a.date);
+  return items.slice(0, limit);
+}
 
-  // 最新3件だけ
-  return items.slice(0, 3);
+function buildEmailText(resultsByCompany) {
+  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+
+  let body = `塗料業界ニュース（自動配信）\n${nowJST}\n\n`;
+
+  for (const r of resultsByCompany) {
+    body += `■ ${r.company}\n`;
+    if (!r.items.length) {
+      body += `  (該当なし)\n\n`;
+      continue;
+    }
+    r.items.forEach((it, idx) => {
+      body += `  [${idx + 1}] ${it.title}\n`;
+      body += `      ${it.date.toISOString()}\n`;
+      body += `      ${it.link}\n`;
+    });
+    body += "\n";
+  }
+
+  return body;
+}
+
+async function sendMailOrLog(bodyText) {
+  const { SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
+
+  // まず Secrets が渡っているかをログで確認（値は出さない）
+  console.log("SMTP_USER set:", !!SMTP_USER);
+  console.log("SMTP_PASS set:", !!SMTP_PASS);
+  console.log("MAIL_TO:", MAIL_TO || "(empty)");
+  console.log("MAIL_FROM:", MAIL_FROM || "(empty)");
+
+  if (!SMTP_USER || !SMTP_PASS || !MAIL_TO || !MAIL_FROM) {
+    console.log("SMTP secrets missing -> skip email sending.");
+    return;
+  }
+
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+
+  await transporter.sendMail({
+    from: MAIL_FROM,
+    to: MAIL_TO,
+    subject: "塗料業界ニュース（GitHub Actions）",
+    text: bodyText,
+  });
+
+  console.log("Email successfully sent to:", MAIL_TO);
 }
 
 async function main() {
-  console.log("=== Paint Industry News Bot (per company latest 3) ===");
+  console.log("=== Paint Industry News Bot (RSS + Email) ===");
+
+  const resultsByCompany = [];
 
   for (const feed of FEEDS) {
     console.log("\n----------------------------------------");
     console.log(`■ ${feed.name}`);
+    console.log(`RSS: ${feed.url}`);
 
     try {
-      const top3 = await fetchLatest3(feed);
+      const items = await fetchLatest(feed, 3);
+      resultsByCompany.push({ company: feed.name, items });
 
-      if (top3.length === 0) {
-        console.log("No items (after filtering).");
-        continue;
-      }
-
-      top3.forEach((n, i) => {
-        console.log(`\n[${i + 1}] ${n.title}`);
-        console.log(`  Date: ${n.date.toISOString()}`);
-        console.log(`  URL : ${n.link}`);
+      console.log(`Fetched ${items.length} items. Showing latest ${items.length}.`);
+      items.forEach((it, i) => {
+        console.log(`\n[${i + 1}] ${it.title}`);
+        console.log(`  Date: ${it.date.toISOString()}`);
+        console.log(`  URL : ${it.link}`);
       });
     } catch (e) {
       console.log(`ERROR: ${e?.message || e}`);
+      resultsByCompany.push({ company: feed.name, items: [] });
     }
   }
+
+  const emailText = buildEmailText(resultsByCompany);
+  await sendMailOrLog(emailText);
 
   console.log("\nDone.");
 }
