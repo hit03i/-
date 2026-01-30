@@ -3,13 +3,11 @@ name: paint-news
 on:
   workflow_dispatch:
   schedule:
-    # 毎日 09:00 JST = 00:00 UTC
-    - cron: "0 0 * * *"
+    - cron: "0 0 * * *" # JST 9:00 = UTC 0:00
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,15 +15,19 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install deps
-        run: npm ci
+        run: |
+          npm init -y
+          npm pkg set type=module
+          npm install rss-parser nodemailer node-fetch@3
 
       - name: Run bot
-        run: node src/main.js
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          TZ: Asia/Tokyo
+        run: node src/main.js
