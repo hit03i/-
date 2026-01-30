@@ -1,0 +1,13 @@
+{
+  "name": "paint-industry-news-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.15",
+    "rss-parser": "^3.13.0"
+  }
+}
