@@ -1,21 +1,26 @@
 // src/main.js
 import Parser from "rss-parser";
 import nodemailer from "nodemailer";
-import fetch from "node-fetch"; // ★ 追加：Google News RSS 403/429対策でfetch経由にする
+import fetch from "node-fetch";
 
 // =========================
-// 0) 実行環境・挙動設定（必要なら env で上書き可）
+// 0) 実行環境・挙動設定（envで上書き可）
 // =========================
 const CONFIG = {
   LIMIT_PER_COMPANY: Number(process.env.LIMIT_PER_COMPANY || 3),
-  // 何も取れなかった時にメールを送るか（false推奨）
-  SEND_IF_EMPTY: (process.env.SEND_IF_EMPTY || "false").toLowerCase() === "true",
-  // HTMLメールも送る（true推奨）
+
+  // 何も取れなかった時もメール送るか（検証中はtrue推奨）
+  SEND_IF_EMPTY: (process.env.SEND_IF_EMPTY || "true").toLowerCase() === "true",
+
+  // HTMLメールも送る
   SEND_HTML: (process.env.SEND_HTML || "true").toLowerCase() === "true",
+
   // RSSの取得リトライ回数
   RSS_RETRY: Number(process.env.RSS_RETRY || 2),
+
   // RSSのタイムアウト(ms)
   RSS_TIMEOUT_MS: Number(process.env.RSS_TIMEOUT_MS || 20000),
+
   // JST表示
   TZ: process.env.TZ || "Asia/Tokyo",
 };
@@ -25,6 +30,9 @@ const parser = new Parser({
   headers: { "User-Agent": "NewsBot/1.0" },
 });
 
+// =========================
+// 1) RSSフィード定義
+// =========================
 const FEEDS = [
   {
     name: "関西ペイント",
@@ -40,10 +48,10 @@ const FEEDS = [
   },
 ];
 
-// 必須ワード
+// 必須ワード（タイトルに含まれること）
 const REQUIRED = ["塗料", "コーティング", "塗装", "paint", "coating"];
 
-// 市場調査/レポート系は除外
+// 除外ワード（市場調査/レポート系）
 const EXCLUDE = [
   "市場調査",
   "市場規模",
@@ -63,17 +71,23 @@ const EXCLUDE = [
   "share",
 ];
 
+// =========================
+// 2) ユーティリティ
+// =========================
 function norm(s) {
   return (s || "").toLowerCase().trim();
 }
+
 function containsAny(text, keywords) {
   const t = norm(text);
   return keywords.some((k) => t.includes(norm(k)));
 }
+
 function toDate(d) {
   const dt = new Date(d);
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
+
 function dedupeByLink(items) {
   const seen = new Set();
   return items.filter((x) => {
@@ -83,12 +97,27 @@ function dedupeByLink(items) {
     return true;
   });
 }
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function nowJstString() {
+  return new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
+}
+
+function escapeHtml(s) {
+  return (s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 // =========================
-// ★ 追加：Google News RSS を fetch→parseString で取得（403/429対策）
+// 3) RSS取得（fetch→parseString）
+//    Google News RSS が parseURL で弾かれることがあるため
 // =========================
 async function fetchRssXml(url) {
   const controller = new AbortController();
@@ -120,9 +149,7 @@ async function parseFeedWithRetry(url, retries = CONFIG.RSS_RETRY) {
       return await parser.parseString(xml);
     } catch (e) {
       lastErr = e;
-      const msg = e?.message || String(e);
-      console.log(`RSS retry ${i + 1}/${retries + 1} failed: ${msg}`);
-      // 429/一時障害っぽい時は少し待つ
+      console.log(`RSS retry ${i + 1}/${retries + 1} failed: ${e?.message || e}`);
       await sleep(800 * (i + 1));
     }
   }
@@ -130,7 +157,6 @@ async function parseFeedWithRetry(url, retries = CONFIG.RSS_RETRY) {
 }
 
 async function fetchLatest(feed, limit = CONFIG.LIMIT_PER_COMPANY) {
-  // ★ 変更：parser.parseURL(feed.url) → fetch+parseString
   const parsed = await parseFeedWithRetry(feed.url);
 
   let items = (parsed.items || [])
@@ -154,10 +180,11 @@ async function fetchLatest(feed, limit = CONFIG.LIMIT_PER_COMPANY) {
   return items.slice(0, limit);
 }
 
+// =========================
+// 4) メール本文生成
+// =========================
 function buildEmailText(resultsByCompany) {
-  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
-
-  let body = `塗料業界ニュース（自動配信）\n${nowJST}\n\n`;
+  let body = `塗料業界ニュース（自動配信）\n${nowJstString()}\n\n`;
 
   for (const r of resultsByCompany) {
     body += `■ ${r.company}\n`;
@@ -176,19 +203,7 @@ function buildEmailText(resultsByCompany) {
   return body;
 }
 
-// ★ 追加：HTMLメールも作る（見やすい＆改行崩れ防止）
-function escapeHtml(s) {
-  return (s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
 function buildEmailHtml(resultsByCompany) {
-  const nowJST = new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
-
   const sections = resultsByCompany
     .map((r) => {
       if (!r.items.length) {
@@ -215,7 +230,7 @@ function buildEmailHtml(resultsByCompany) {
   return `
     <div style="font-family: Arial, Helvetica, sans-serif; line-height:1.5;">
       <div style="font-size:18px; font-weight:700;">塗料業界ニュース（自動配信）</div>
-      <div style="color:#666; margin:6px 0 14px;">${escapeHtml(nowJST)}</div>
+      <div style="color:#666; margin:6px 0 14px;">${escapeHtml(nowJstString())}</div>
       ${sections}
       <hr style="margin:18px 0; border:none; border-top:1px solid #ddd;" />
       <div style="font-size:12px; color:#888;">Sent by GitHub Actions</div>
@@ -227,10 +242,12 @@ function countAllItems(resultsByCompany) {
   return resultsByCompany.reduce((sum, r) => sum + (r.items?.length || 0), 0);
 }
 
-async function sendMailOrLog(bodyText, bodyHtml, totalItems) {
+// =========================
+// 5) メール送信
+// =========================
+async function sendMailOrLog(textBody, htmlBody, totalItems) {
   const { SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
 
-  // Secrets チェック（値は出さない）
   console.log("SMTP_USER set:", !!SMTP_USER);
   console.log("SMTP_PASS set:", !!SMTP_PASS);
   console.log("MAIL_TO set:", !!MAIL_TO);
@@ -244,7 +261,6 @@ async function sendMailOrLog(bodyText, bodyHtml, totalItems) {
     return;
   }
 
-  // 0件なら送らない（スパム化防止）
   if (!CONFIG.SEND_IF_EMPTY && totalItems === 0) {
     console.log("No news items -> skip email sending (SEND_IF_EMPTY=false).");
     return;
@@ -258,14 +274,14 @@ async function sendMailOrLog(bodyText, bodyHtml, totalItems) {
   });
 
   const mail = {
-    from: MAIL_FROM,
+    from: MAIL_FROM, // まずは SMTP_USER と同じアドレス推奨
     to: MAIL_TO,
     subject: "塗料業界ニュース（GitHub Actions）",
-    text: bodyText,
+    text: textBody,
   };
 
   if (CONFIG.SEND_HTML) {
-    mail.html = bodyHtml;
+    mail.html = htmlBody;
   }
 
   await transporter.sendMail(mail);
@@ -273,6 +289,9 @@ async function sendMailOrLog(bodyText, bodyHtml, totalItems) {
   console.log("Email successfully sent to:", MAIL_TO);
 }
 
+// =========================
+// 6) メイン処理
+// =========================
 async function main() {
   console.log("=== Paint Industry News Bot (RSS + Email) ===");
   console.log("Node:", process.version);
@@ -302,7 +321,6 @@ async function main() {
   }
 
   const totalItems = countAllItems(resultsByCompany);
-
   const emailText = buildEmailText(resultsByCompany);
   const emailHtml = buildEmailHtml(resultsByCompany);
 
@@ -315,39 +333,3 @@ main().catch((err) => {
   console.error("FATAL:", err?.message || err);
   process.exit(1);
 });
-
-const { SMTP_USER, SMTP_PASS, MAIL_TO, MAIL_FROM } = process.env;
-
-console.log("SMTP_USER set:", !!SMTP_USER);
-console.log("SMTP_PASS set:", !!SMTP_PASS);
-console.log("MAIL_TO:", MAIL_TO || "(empty)");
-console.log("MAIL_FROM:", MAIL_FROM || "(empty)");
-
-if (!SMTP_USER || !SMTP_PASS || !MAIL_TO || !MAIL_FROM) {
-  console.log("SMTP secrets missing -> skip email sending.");
-} else {
-  const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-
-  const lines = (allItems || [])
-    .slice(0, 10)
-    .map((it, i) => `[${i + 1}] ${it.title}\n${it.date?.toISOString?.() || ""}\n${it.link}\n`)
-    .join("\n");
-
-  const body = `塗料業界ニュース（GitHub Actions）\n${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })}\n\n${lines}`;
-
-  await transporter.sendMail({
-    from: MAIL_FROM,
-    to: MAIL_TO,
-    subject: "塗料業界ニュース（GitHub Actions）",
-    text: body,
-  });
-
-  console.log("Email successfully sent to:", MAIL_TO);
-}
-// 
-
