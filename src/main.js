@@ -1,5 +1,7 @@
 import Parser from "rss-parser";
 import nodemailer from "nodemailer";
+import fs from "fs";
+import path from "path";
 
 /*
 Required secrets:
@@ -22,9 +24,6 @@ const {
   SMTP_PASS
 } = process.env;
 
-// --------------------
-// 必須チェック
-// --------------------
 function must(v, name) {
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
@@ -38,8 +37,16 @@ must(SMTP_PASS, "SMTP_PASS");
 
 const FROM = MAIL_FROM || SMTP_USER;
 
+// ====== 履歴ファイル（Actions Cacheで永続化する） ======
+const DATA_DIR = "data";
+const SENT_PATH = path.join(DATA_DIR, "sent.json");
+
+// どれくらい履歴を保持するか（肥大化防止）
+// 例えば90日分だけ残す
+const KEEP_DAYS = 90;
+
 // --------------------
-// Google News RSS URL を安全に生成（日本語/スペース/括弧を自動エンコード）
+// Google News RSS URL を安全に生成
 // --------------------
 function googleNewsRssUrl(query, hl = "ja", gl = "JP", ceid = "JP:ja") {
   const q = encodeURIComponent(query);
@@ -68,9 +75,6 @@ const FEEDS = [
   }
 ];
 
-// --------------------
-// Utility
-// --------------------
 function sortByDateDesc(a, b) {
   const da = Date.parse(a.pubDate || "") || 0;
   const db = Date.parse(b.pubDate || "") || 0;
@@ -86,66 +90,101 @@ function normalizeItem(source, item) {
   const link = (item.link || "").trim();
   const pubDate = item.isoDate || item.pubDate || "";
 
-  // ★重要：source をキーに含める（会社を跨いで重複排除しない）
+  // 送信済み判定キー（会社単位で保持）
   const key = `${source}|${link || `title:${title}`}`;
 
   return { key, source, title, link, pubDate };
 }
 
+// ====== 送信済み履歴の読み書き ======
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function loadSent() {
+  try {
+    if (!fs.existsSync(SENT_PATH)) return {};
+    const raw = fs.readFileSync(SENT_PATH, "utf-8");
+    const obj = JSON.parse(raw);
+    return obj && typeof obj === "object" ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function pruneSent(sentObj) {
+  // sentObj: { [key]: "YYYY-MM-DD" }
+  const cutoff = Date.now() - KEEP_DAYS * 24 * 60 * 60 * 1000;
+  const pruned = {};
+  for (const [k, v] of Object.entries(sentObj || {})) {
+    const t = Date.parse(v) || 0;
+    if (t >= cutoff) pruned[k] = v;
+  }
+  return pruned;
+}
+
+function saveSent(sentObj) {
+  ensureDataDir();
+  fs.writeFileSync(SENT_PATH, JSON.stringify(sentObj, null, 2), "utf-8");
+}
+
 // --------------------
-// 会社ごとに最新2件を取得（会社間で消えない設計）
+// 会社ごとに候補を取り、送信済みを除外して最新2件選ぶ
 // --------------------
-async function fetchPerCompanyLatest(perCompanyLimit = 2) {
+async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 2) {
   const parser = new Parser({ timeout: 20000 });
 
-  // 会社ごとの配列
-  const byCompany = {};
-  for (const f of FEEDS) byCompany[f.name] = [];
+  // 送信済み履歴
+  let sent = pruneSent(loadSent());
 
-  // 会社ごとに取得
-  for (const f of FEEDS) {
-    try {
-      const feed = await parser.parseURL(f.url);
+  const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
-      // デバッグしたいときはこの1行をコメント解除
-      // console.log("[DEBUG] items:", f.name, (feed.items || []).length);
-
-      const items = (feed.items || []).map((it) => normalizeItem(f.name, it));
-      byCompany[f.name].push(...items);
-    } catch (e) {
-      console.error(`[WARN] RSS failed: ${f.name}`, e?.message || e);
-    }
-  }
-
-  // 会社ごとに：重複排除→新しい順→タイトル重複も軽く排除→上位2件
   const picked = [];
 
-  for (const company of Object.keys(byCompany)) {
-    const raw = byCompany[company] || [];
+  for (const f of FEEDS) {
+    let items = [];
+    try {
+      const feed = await parser.parseURL(f.url);
+      items = (feed.items || []).map((it) => normalizeItem(f.name, it));
+    } catch (e) {
+      console.error(`[WARN] RSS failed: ${f.name}`, e?.message || e);
+      items = [];
+    }
 
-    // 1) key（会社内）で重複排除
+    // 会社内重複排除（key）
     const map = new Map();
-    for (const it of raw) {
+    for (const it of items) {
       if (!it.title) continue;
       if (!map.has(it.key)) map.set(it.key, it);
     }
     const uniq = Array.from(map.values()).sort(sortByDateDesc);
 
-    // 2) タイトルで軽く重複排除（Googleニュースの微妙な揺れ対策）
+    // 送信済み除外＋タイトル軽重複除外しながら2件選ぶ
     const seenTitle = new Set();
-    const final = [];
+    const chosen = [];
+
     for (const it of uniq) {
+      if (sent[it.key]) continue; // ★送信済みならスキップ
       const t = normTitle(it.title);
       if (seenTitle.has(t)) continue;
       seenTitle.add(t);
-      final.push(it);
-      if (final.length >= perCompanyLimit) break;
+      chosen.push(it);
+      if (chosen.length >= perCompanyLimit) break;
     }
 
-    picked.push(...final);
+    // 選んだものを履歴へ登録（次回送らない）
+    for (const it of chosen) {
+      sent[it.key] = todayJst;
+    }
+
+    picked.push(...chosen);
   }
 
-  // メール全体は日付順に並べる
+  // 保存（Actions Cacheで永続化される想定）
+  saveSent(sent);
+
   return picked.sort(sortByDateDesc);
 }
 
@@ -162,8 +201,6 @@ function buildMailBody(items) {
   lines.push("");
 
   const companyOrder = FEEDS.map((f) => f.name);
-
-  // 会社ごとにまとめる
   const grouped = {};
   for (const c of companyOrder) grouped[c] = [];
   for (const it of items) {
@@ -179,7 +216,7 @@ function buildMailBody(items) {
     lines.push(`▼ ${company}`);
 
     if (list.length === 0) {
-      lines.push("（該当ニュースなし）");
+      lines.push("（新着なし：前回までに送信済み or 該当ニュースなし）");
       lines.push("");
       continue;
     }
@@ -195,7 +232,7 @@ function buildMailBody(items) {
   }
 
   if (!any) {
-    return `📰 塗料業界ニュース（${todayJst}）\n\n本日は該当ニュースが見つかりませんでした。\n`;
+    return `📰 塗料業界ニュース（${todayJst}）\n\n今週は新着がありません（前回までに送信済み、または該当ニュースなし）。\n`;
   }
 
   return lines.join("\n");
@@ -228,13 +265,13 @@ async function sendMail(subject, body) {
 // main
 // --------------------
 async function main() {
-  const items = await fetchPerCompanyLatest(2);
+  const items = await fetchPerCompanyLatestAvoidSent(2);
 
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
 
-  const subject = `塗料業界ニュース ${todayJst}`;
+  const subject = `塗料業界ニュース（週次） ${todayJst}`;
   const body = buildMailBody(items);
 
   const mid = await sendMail(subject, body);
