@@ -1,17 +1,17 @@
 import Parser from "rss-parser";
 import nodemailer from "nodemailer";
 
-/**
- * =========================
- * 1) 設定（環境変数）
- * =========================
- * 必須:
- *  - MAIL_TO
- *  - SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
- * 任意:
- *  - MAIL_FROM (未指定なら SMTP_USER)
- *  - MAX_ITEMS (未指定なら 8)
- */
+/*
+Required secrets:
+- MAIL_TO
+- SMTP_HOST
+- SMTP_PORT
+- SMTP_USER
+- SMTP_PASS
+
+Optional:
+- MAIL_FROM (default: SMTP_USER)
+*/
 
 const {
   MAIL_TO,
@@ -19,10 +19,12 @@ const {
   SMTP_HOST,
   SMTP_PORT,
   SMTP_USER,
-  SMTP_PASS,
-  MAX_ITEMS
+  SMTP_PASS
 } = process.env;
 
+// --------------------
+// 必須チェック
+// --------------------
 function must(v, name) {
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
@@ -35,31 +37,43 @@ must(SMTP_USER, "SMTP_USER");
 must(SMTP_PASS, "SMTP_PASS");
 
 const FROM = MAIL_FROM || SMTP_USER;
-const LIMIT = Number(MAX_ITEMS || 8);
 
-// ここにRSSを足していく（まずは少数で安定させる）
+// --------------------
+// RSS 定義（3社）
+// --------------------
 const FEEDS = [
   {
     name: "関西ペイント",
-    url: "https://news.google.com/rss/search?q=(%E9%96%A2%E8%A5%BF%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Kansai%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20coating%20OR%20paint%20OR%20%E9%A1%94%E6%96%99%20OR%20pigment)&hl=ja&gl=JP&ceid=JP:ja"
+    url: "https://news.google.com/rss/search?q=(関西ペイント OR Kansai Paint) (塗料 OR coating OR paint OR 顔料 OR pigment)&hl=ja&gl=JP&ceid=JP:ja"
   },
   {
     name: "日本ペイント",
-    url: "https://news.google.com/rss/search?q=(%E6%97%A5%E6%9C%AC%E3%83%9A%E3%82%A4%E3%83%B3%E3%83%88%20OR%20Nippon%20Paint)%20(%E5%A1%97%E6%96%99%20OR%20coating%20OR%20paint%20OR%20%E9%A1%94%E6%96%99%20OR%20pigment)&hl=ja&gl=JP&ceid=JP:ja"
+    url: "https://news.google.com/rss/search?q=(日本ペイント OR Nippon Paint) (塗料 OR coating OR paint OR 顔料 OR pigment)&hl=ja&gl=JP&ceid=JP:ja"
+  },
+  {
+    name: "BASF",
+    url: "https://news.google.com/rss/search?q=(BASF) (coatings OR coating OR paint OR pigment)&hl=ja&gl=JP&ceid=JP:ja"
   }
 ];
 
-// GoogleニュースRSSは item.link が “ニュース経由URL” だったりするので、最低限の整形
-function normalizeItem(feedName, item) {
+// --------------------
+// Utility
+// --------------------
+function normalizeItem(source, item) {
   const title = (item.title || "").trim();
   const link = (item.link || "").trim();
   const pubDate = item.isoDate || item.pubDate || "";
-  const source = feedName;
 
-  // 重複除去キー：link優先、無ければ title
-  const key = link ? link : `title:${title}`;
+  // 重複判定キー
+  const key = link || `title:${title}`;
 
-  return { key, source, title, link, pubDate };
+  return {
+    key,
+    source,
+    title,
+    link,
+    pubDate
+  };
 }
 
 function sortByDateDesc(a, b) {
@@ -68,73 +82,100 @@ function sortByDateDesc(a, b) {
   return db - da;
 }
 
-// メール本文（テキスト）を作る：空メール防止で最低1行は必ず出す
+// --------------------
+// RSS 取得＆整理
+// --------------------
+async function fetchAll() {
+  const parser = new Parser({ timeout: 20000 });
+  const collected = [];
+
+  for (const feed of FEEDS) {
+    try {
+      const res = await parser.parseURL(feed.url);
+      const items = (res.items || []).map((it) =>
+        normalizeItem(feed.name, it)
+      );
+      collected.push(...items);
+    } catch (e) {
+      console.error(`[WARN] RSS failed: ${feed.name}`, e.message);
+    }
+  }
+
+  // 1次重複除去（link / title）
+  const uniqueMap = new Map();
+  for (const it of collected) {
+    if (!it.title) continue;
+    if (!uniqueMap.has(it.key)) uniqueMap.set(it.key, it);
+  }
+
+  const unique = Array.from(uniqueMap.values()).sort(sortByDateDesc);
+
+  // --------------------
+  // 各社 最新2件まで
+  // --------------------
+  const PER_COMPANY_LIMIT = 2;
+  const grouped = {};
+
+  for (const it of unique) {
+    if (!grouped[it.source]) grouped[it.source] = [];
+    if (grouped[it.source].length < PER_COMPANY_LIMIT) {
+      grouped[it.source].push(it);
+    }
+  }
+
+  // フラット化（全体は日付順）
+  return Object.values(grouped).flat().sort(sortByDateDesc);
+}
+
+// --------------------
+// メール本文作成
+// --------------------
 function buildMailBody(items) {
-  const today = new Date();
-  const ymd = today.toISOString().slice(0, 10);
+  const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
   if (!items.length) {
-    return `📰 塗料業界ニュース（${ymd}）\n\n本日は該当ニュースが見つかりませんでした。\n`;
+    return `📰 塗料業界ニュース（${today}）
+
+本日は該当ニュースが見つかりませんでした。
+`;
   }
 
   const lines = [];
-  lines.push(`📰 塗料業界ニュース（${ymd}）`);
+  lines.push(`📰 塗料業界ニュース（${today})`);
   lines.push("");
+
+  let currentSource = "";
   items.forEach((it, idx) => {
+    if (it.source !== currentSource) {
+      currentSource = it.source;
+      lines.push(`▼ ${currentSource}`);
+    }
+
     lines.push(`【${idx + 1}】${it.title}`);
-    lines.push(`出典：${it.source}`);
     if (it.pubDate) lines.push(`日付：${it.pubDate}`);
     if (it.link) lines.push(`URL：${it.link}`);
     lines.push("");
   });
+
   return lines.join("\n");
 }
 
-async function fetchAll() {
-  const parser = new Parser({ timeout: 20000 });
-  const all = [];
-
-  for (const f of FEEDS) {
-    try {
-      const feed = await parser.parseURL(f.url);
-      const items = (feed.items || []).map((it) => normalizeItem(f.name, it));
-      all.push(...items);
-    } catch (e) {
-      // 1フィード死んでも全体は続行（Actions失敗にしない）
-      console.error(`[WARN] feed failed: ${f.name}`, e?.message || e);
-    }
-  }
-
-  // 重複排除
-  const map = new Map();
-  for (const it of all) {
-    if (!it.title) continue;
-    if (!map.has(it.key)) map.set(it.key, it);
-  }
-
-  const uniq = Array.from(map.values()).sort(sortByDateDesc);
-
-  // タイトルでもう一段ゆるく重複排除（Googleニュースでlinkが揺れる時対策）
-  const titleSet = new Set();
-  const final = [];
-  for (const it of uniq) {
-    const tkey = it.title.replace(/\s+/g, " ").trim();
-    if (titleSet.has(tkey)) continue;
-    titleSet.add(tkey);
-    final.push(it);
-    if (final.length >= LIMIT) break;
-  }
-
-  return final;
-}
-
+// --------------------
+// メール送信
+// --------------------
 async function sendMail(subject, body) {
   const port = Number(SMTP_PORT);
+
   const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port,
-    secure: port === 465, // 465ならtrue、それ以外はfalseが基本
-    auth: { user: SMTP_USER, pass: SMTP_PASS }
+    secure: port === 465,
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS
+    }
   });
 
   const info = await transporter.sendMail({
@@ -144,19 +185,24 @@ async function sendMail(subject, body) {
     text: body
   });
 
-  return info.messageId || "sent";
+  return info.messageId;
 }
 
+// --------------------
+// main
+// --------------------
 async function main() {
   const items = await fetchAll();
   const body = buildMailBody(items);
 
-  const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
-  const ymd = jst.toISOString().slice(0, 10);
-  const subject = `塗料業界ニュース ${ymd}`;
+  const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
 
-  const mid = await sendMail(subject, body);
-  console.log("OK:", { count: items.length, messageId: mid });
+  const subject = `塗料業界ニュース ${today}`;
+
+  const messageId = await sendMail(subject, body);
+  console.log("Mail sent:", messageId);
 }
 
 main().catch((e) => {
