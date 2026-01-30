@@ -31,10 +31,7 @@ const FEEDS = [
   },
 ];
 
-// 必須ワード（タイトルに含まれること）
 const REQUIRED = ["塗料", "コーティング", "塗装", "paint", "coating"];
-
-// 市場調査/レポート系の除外ワード（タイトルに含まれたら除外）
 const EXCLUDE = [
   "市場調査",
   "市場規模",
@@ -78,7 +75,6 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Google News RSS を fetch → parseString（403/429対策）
 async function fetchRssXml(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), CONFIG.RSS_TIMEOUT_MS);
@@ -139,7 +135,6 @@ async function fetchLatest(feed, limit = CONFIG.LIMIT_PER_COMPANY) {
 
 function buildEmailText(resultsByCompany) {
   const nowJST = new Date().toLocaleString("ja-JP", { timeZone: CONFIG.TZ });
-
   let body = `塗料業界ニュース（GitHub Actions）\n${nowJST}\n\n`;
 
   for (const r of resultsByCompany) {
