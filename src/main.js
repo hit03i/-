@@ -22,9 +22,6 @@ const {
   SMTP_PASS
 } = process.env;
 
-// --------------------
-// 必須チェック
-// --------------------
 function must(v, name) {
   if (!v) throw new Error(`Missing env: ${name}`);
   return v;
@@ -38,9 +35,7 @@ must(SMTP_PASS, "SMTP_PASS");
 
 const FROM = MAIL_FROM || SMTP_USER;
 
-// --------------------
-// RSS 定義（3社）
-// --------------------
+// ===== RSS（3社）=====
 const FEEDS = [
   {
     name: "関西ペイント",
@@ -56,126 +51,131 @@ const FEEDS = [
   }
 ];
 
-// --------------------
-// Utility
-// --------------------
-function normalizeItem(source, item) {
-  const title = (item.title || "").trim();
-  const link = (item.link || "").trim();
-  const pubDate = item.isoDate || item.pubDate || "";
-
-  // 重複判定キー
-  const key = link || `title:${title}`;
-
-  return {
-    key,
-    source,
-    title,
-    link,
-    pubDate
-  };
-}
-
 function sortByDateDesc(a, b) {
   const da = Date.parse(a.pubDate || "") || 0;
   const db = Date.parse(b.pubDate || "") || 0;
   return db - da;
 }
 
-// --------------------
-// RSS 取得＆整理
-// --------------------
-async function fetchAll() {
-  const parser = new Parser({ timeout: 20000 });
-  const collected = [];
-
-  for (const feed of FEEDS) {
-    try {
-      const res = await parser.parseURL(feed.url);
-      const items = (res.items || []).map((it) =>
-        normalizeItem(feed.name, it)
-      );
-      collected.push(...items);
-    } catch (e) {
-      console.error(`[WARN] RSS failed: ${feed.name}`, e.message);
-    }
-  }
-
-  // 1次重複除去（link / title）
-  const uniqueMap = new Map();
-  for (const it of collected) {
-    if (!it.title) continue;
-    if (!uniqueMap.has(it.key)) uniqueMap.set(it.key, it);
-  }
-
-  const unique = Array.from(uniqueMap.values()).sort(sortByDateDesc);
-
-  // --------------------
-  // 各社 最新2件まで
-  // --------------------
-  const PER_COMPANY_LIMIT = 2;
-  const grouped = {};
-
-  for (const it of unique) {
-    if (!grouped[it.source]) grouped[it.source] = [];
-    if (grouped[it.source].length < PER_COMPANY_LIMIT) {
-      grouped[it.source].push(it);
-    }
-  }
-
-  // フラット化（全体は日付順）
-  return Object.values(grouped).flat().sort(sortByDateDesc);
+function normTitle(t) {
+  return (t || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-// --------------------
-// メール本文作成
-// --------------------
+function normalizeItem(source, item) {
+  const title = (item.title || "").trim();
+  const link = (item.link || "").trim();
+  const pubDate = item.isoDate || item.pubDate || "";
+
+  // ★重要：source をキーに含める（会社を跨いで重複排除しない）
+  const key = `${source}|${link || `title:${title}`}`;
+
+  return { key, source, title, link, pubDate };
+}
+
+async function fetchPerCompanyLatest(perCompanyLimit = 2) {
+  const parser = new Parser({ timeout: 20000 });
+
+  // 会社ごとの配列を作る
+  const byCompany = {};
+  for (const f of FEEDS) byCompany[f.name] = [];
+
+  // 会社ごとに取得
+  for (const f of FEEDS) {
+    try {
+      const feed = await parser.parseURL(f.url);
+      const items = (feed.items || []).map((it) => normalizeItem(f.name, it));
+      byCompany[f.name].push(...items);
+    } catch (e) {
+      console.error(`[WARN] RSS failed: ${f.name}`, e?.message || e);
+    }
+  }
+
+  // 会社ごとに：重複排除→新しい順→タイトルの重複も軽く排除→上位2件
+  const picked = [];
+  for (const company of Object.keys(byCompany)) {
+    const raw = byCompany[company];
+
+    // 1) key（会社内でのlink/title）で重複排除
+    const map = new Map();
+    for (const it of raw) {
+      if (!it.title) continue;
+      if (!map.has(it.key)) map.set(it.key, it);
+    }
+    const uniq = Array.from(map.values()).sort(sortByDateDesc);
+
+    // 2) タイトルでも軽く重複排除（同一記事が形を変えて出る対策）
+    const seenTitle = new Set();
+    const final = [];
+    for (const it of uniq) {
+      const t = normTitle(it.title);
+      if (seenTitle.has(t)) continue;
+      seenTitle.add(t);
+      final.push(it);
+      if (final.length >= perCompanyLimit) break;
+    }
+
+    picked.push(...final);
+  }
+
+  // メール全体は日付順で並べる（見やすさ）
+  return picked.sort(sortByDateDesc);
+}
+
 function buildMailBody(items) {
-  const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+  const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
 
-  if (!items.length) {
-    return `📰 塗料業界ニュース（${today}）
-
-本日は該当ニュースが見つかりませんでした。
-`;
-  }
-
   const lines = [];
-  lines.push(`📰 塗料業界ニュース（${today})`);
+  lines.push(`📰 塗料業界ニュース（${todayJst}）`);
   lines.push("");
 
-  let currentSource = "";
-  items.forEach((it, idx) => {
-    if (it.source !== currentSource) {
-      currentSource = it.source;
-      lines.push(`▼ ${currentSource}`);
+  // 会社別にセクションを作る（会社が0件でも見出しを出したい場合はここを調整可）
+  const companyOrder = FEEDS.map((f) => f.name);
+  const grouped = {};
+  for (const c of companyOrder) grouped[c] = [];
+  for (const it of items) {
+    if (!grouped[it.source]) grouped[it.source] = [];
+    grouped[it.source].push(it);
+  }
+
+  let globalIndex = 1;
+  let any = false;
+
+  for (const company of companyOrder) {
+    const list = grouped[company] || [];
+    lines.push(`▼ ${company}`);
+    if (list.length === 0) {
+      lines.push("（該当ニュースなし）");
+      lines.push("");
+      continue;
     }
 
-    lines.push(`【${idx + 1}】${it.title}`);
-    if (it.pubDate) lines.push(`日付：${it.pubDate}`);
-    if (it.link) lines.push(`URL：${it.link}`);
-    lines.push("");
-  });
+    any = true;
+    for (const it of list) {
+      lines.push(`【${globalIndex}】${it.title}`);
+      if (it.pubDate) lines.push(`日付：${it.pubDate}`);
+      if (it.link) lines.push(`URL：${it.link}`);
+      lines.push("");
+      globalIndex += 1;
+    }
+  }
+
+  if (!any) {
+    // 全社ゼロのとき（保険）
+    return `📰 塗料業界ニュース（${todayJst}）\n\n本日は該当ニュースが見つかりませんでした。\n`;
+  }
 
   return lines.join("\n");
 }
 
-// --------------------
-// メール送信
-// --------------------
 async function sendMail(subject, body) {
   const port = Number(SMTP_PORT);
-
   const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port,
     secure: port === 465,
-    auth: {
-      user: SMTP_USER,
-      pass: SMTP_PASS
-    }
+    auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
 
   const info = await transporter.sendMail({
@@ -185,24 +185,21 @@ async function sendMail(subject, body) {
     text: body
   });
 
-  return info.messageId;
+  return info.messageId || "sent";
 }
 
-// --------------------
-// main
-// --------------------
 async function main() {
-  const items = await fetchAll();
-  const body = buildMailBody(items);
+  const items = await fetchPerCompanyLatest(2);
 
-  const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+  const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
 
-  const subject = `塗料業界ニュース ${today}`;
+  const subject = `塗料業界ニュース ${todayJst}`;
+  const body = buildMailBody(items);
 
-  const messageId = await sendMail(subject, body);
-  console.log("Mail sent:", messageId);
+  const mid = await sendMail(subject, body);
+  console.log("OK:", { count: items.length, messageId: mid });
 }
 
 main().catch((e) => {
