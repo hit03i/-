@@ -3,6 +3,15 @@ import nodemailer from "nodemailer";
 import fs from "fs";
 import path from "path";
 
+// ==============================
+// 月曜以外は送信しない安全装置
+// ==============================
+const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+const jstDay = jst.getDay(); // 0=日, 1=月, 2=火 ...
+if (jstDay !== 1) {
+  console.log("Not Monday JST. Skip sending.", jst.toISOString());
+  process.exit(0);
+}
 /*
 Required secrets:
 - MAIL_TO
