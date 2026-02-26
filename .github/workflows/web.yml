@@ -1,0 +1,33 @@
+name: Update news.json for Pages
+
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 毎日（UTC 0:00）。日本時間だと朝9時
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build news.json
+        run: node src/main.js
+
+      - name: Commit news.json
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add news.json data/sent.json || true
+          git commit -m "update news.json" || echo "No changes"
+          git push
