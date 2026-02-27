@@ -36,12 +36,12 @@ const FEEDS = [
       "(関西ペイント OR Kansai Paint) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment) -ネイル -絵の具 -DIY"
     )
   },
-  {
-    name: "日本ペイント",
-    url: googleNewsRssUrl(
-      "(日本ペイント OR Nippon Paint) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment) -ネイル -絵の具 -DIY"
-    )
-  },
+{
+  name: "日本ペイント",
+  url: googleNewsRssUrl(
+    "(日本ペイント OR Nippon Paint OR Nippon Paint Holdings OR ニッペ) (塗料 OR コーティング OR paint OR coating OR 建築 OR 自動車 OR リフィニッシュ OR 顔料 OR pigment) -ネイル -絵の具 -DIY"
+  )
+},
   {
     name: "BASF",
     url: googleNewsRssUrl(
