@@ -162,15 +162,10 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
 
     // Web表示用に整形（date/title/url）
     result[f.name] = chosen.map((it) => ({
-      date: (it.pubDate || "").slice(0, 10) || todayJst,
-      title: it.title,
-      url: it.link
-    }));
-  }
-
-  saveSent(sent);
-  return result;
-}
+  date: (it.pubDate || "").slice(0, 10) || todayJst,
+  title: (it.title || "").trim(),
+  url: (it.link || "").trim()
+}));
 
 // --------------------
 // news.json を出力
