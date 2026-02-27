@@ -16,7 +16,7 @@ const OUT_PATH = "news.json";
 const PER_COMPANY_LIMIT = 3;
 
 // 直近何日分を対象にするか（古い記事を拾いに行かない＝軽量化）
-const MAX_AGE_DAYS = 14;
+const MAX_AGE_DAYS = 30; // ← 14→30に（週次更新だと空になりにくい）
 
 // --------------------
 // Google News RSS URL を安全に生成
@@ -45,7 +45,7 @@ const FEEDS = [
   {
     name: "BASF",
     url: googleNewsRssUrl(
-      "(BASF) (coatings OR coating OR paint OR pigment) -cosmetics -nail -art"
+      "(BASF OR \"BASF Coatings\") (coatings OR coating OR paint OR refinish OR automotive OR pigment) -cosmetics -nail -art"
     )
   }
 ];
@@ -64,10 +64,7 @@ function normalizeItem(source, item) {
   const title = (item.title || "").trim();
   const link = (item.link || "").trim();
   const pubDate = item.isoDate || item.pubDate || "";
-
-  // 既出判定キー（会社単位で保持）
   const key = `${source}|${link || `title:${title}`}`;
-
   return { key, source, title, link, pubDate };
 }
 
@@ -104,13 +101,13 @@ function saveSent(sentObj) {
 
 function withinMaxAge(pubDate) {
   const t = Date.parse(pubDate || "") || 0;
-  if (!t) return true; // 日付不明は一応通す
+  if (!t) return true;
   const cutoff = Date.now() - MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
   return t >= cutoff;
 }
 
 // --------------------
-// 会社ごとに候補を取り、送信済み（=既出）を除外して最新N件選ぶ
+// 会社ごとに候補を取り、既出を除外して最新N件選ぶ
 // --------------------
 async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
   const parser = new Parser({ timeout: 20000 });
@@ -121,7 +118,6 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
     .toISOString()
     .slice(0, 10);
 
-  // 会社ごとの結果を格納（Webは会社別に出したい）
   const result = {};
 
   for (const f of FEEDS) {
@@ -134,7 +130,6 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
       items = [];
     }
 
-    // 会社内重複排除（key）
     const map = new Map();
     for (const it of items) {
       if (!it.title) continue;
@@ -147,7 +142,7 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
     const chosen = [];
 
     for (const it of uniq) {
-      if (sent[it.key]) continue; // 既出はスキップ
+      if (sent[it.key]) continue;
       const t = normTitle(it.title);
       if (seenTitle.has(t)) continue;
       seenTitle.add(t);
@@ -155,20 +150,23 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
       if (chosen.length >= perCompanyLimit) break;
     }
 
-    // 選んだものを履歴へ登録（次回出さない）
     for (const it of chosen) {
       sent[it.key] = todayJst;
     }
 
-    // Web表示用に整形（date/title/url）
     result[f.name] = chosen.map((it) => ({
-  date: (it.pubDate || "").slice(0, 10) || todayJst,
-  title: (it.title || "").trim(),
-  url: (it.link || "").trim()
-}));
+      date: (it.pubDate || "").slice(0, 10) || todayJst,
+      title: (it.title || "").trim(),
+      url: (it.link || "").trim()
+    }));
+  }
+
+  saveSent(sent);
+  return result;
+}
 
 // --------------------
-// news.json を出力
+// main
 // --------------------
 async function main() {
   const data = await fetchPerCompanyLatestAvoidSent(PER_COMPANY_LIMIT);
