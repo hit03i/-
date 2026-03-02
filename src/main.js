@@ -36,19 +36,19 @@ const FEEDS = [
   {
     name: "関西ペイント",
     url: googleNewsRssUrl(
-      "(関西ペイント OR Kansai Paint) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment OR 自動車 OR 建築) -ネイル -絵の具 -DIY"
+      "(関西ペイント OR Kansai Paint) (自動車 OR automotive OR OEM OR リフィニッシュ OR 車両) (塗料 OR coating) -市場 -調査 -レポート -ドリームニュース"
     )
   },
   {
     name: "日本ペイント",
     url: googleNewsRssUrl(
-      "(日本ペイント OR Nippon Paint OR Nippon Paint Holdings OR ニッペ) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment OR 自動車 OR 建築 OR リフィニッシュ) -ネイル -絵の具 -DIY"
+      "(日本ペイント OR Nippon Paint OR ニッペ) (自動車 OR automotive OR OEM OR リフィニッシュ OR 車両) (塗料 OR coating) -市場 -調査 -レポート -ドリームニュース"
     )
   },
   {
     name: "BASF",
     url: googleNewsRssUrl(
-      "(BASF OR \"BASF Coatings\") (coatings OR coating OR paint OR refinish OR automotive OR pigment) -cosmetics -nail -art"
+      "(BASF Coatings OR BASF automotive) (automotive OR OEM OR refinish) -market -report -analysis"
     )
   }
 ];
