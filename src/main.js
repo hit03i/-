@@ -138,21 +138,29 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
     }
     const uniq = Array.from(map.values()).sort(sortByDateDesc);
 
-    const seenTitle = new Set();
-    const chosen = [];
+const seenTitle = new Set();
+const chosen = [];
 
-    for (const it of uniq) {
-      if (sent[it.key]) continue;
-      const t = normTitle(it.title);
-      if (seenTitle.has(t)) continue;
-      seenTitle.add(t);
-      chosen.push(it);
-      if (chosen.length >= perCompanyLimit) break;
-    }
+// 1) まず「未出」だけで選ぶ（新着優先）
+for (const it of uniq) {
+  if (sent[it.key]) continue;
+  const t = normTitle(it.title);
+  if (seenTitle.has(t)) continue;
+  seenTitle.add(t);
+  chosen.push(it);
+  if (chosen.length >= perCompanyLimit) break;
+}
 
-    for (const it of chosen) {
-      sent[it.key] = todayJst;
-    }
+// 2) 足りなければ「既出」も混ぜて埋める（週次でも空にならない）
+if (chosen.length < perCompanyLimit) {
+  for (const it of uniq) {
+    const t = normTitle(it.title);
+    if (seenTitle.has(t)) continue;
+    seenTitle.add(t);
+    chosen.push(it);
+    if (chosen.length >= perCompanyLimit) break;
+  }
+}
 
     result[f.name] = chosen.map((it) => ({
       date: (it.pubDate || "").slice(0, 10) || todayJst,
