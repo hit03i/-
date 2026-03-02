@@ -9,14 +9,17 @@ const DATA_DIR = "data";
 const SENT_PATH = path.join(DATA_DIR, "sent.json");
 const KEEP_DAYS = 90;
 
-// news.json はリポジトリ直下に置く（index.html が fetch('news.json') するため）
+// GitHub Pages: index.html が fetch('news.json') するため、リポジトリ直下に出力
 const OUT_PATH = "news.json";
 
-// 会社ごとの表示件数
+// 会社ごとの表示件数（最大）
 const PER_COMPANY_LIMIT = 3;
 
-// 直近何日分を対象にするか（古い記事を拾いに行かない＝軽量化）
-const MAX_AGE_DAYS = 30; // ← 14→30に（週次更新だと空になりにくい）
+// 直近何日分を優先するか（週次なら30〜60が安定）
+const MAX_AGE_DAYS = 60;
+
+// 「古い記事を切る」スイッチ（もしまた空になったら true→false にすると原因切り分けが楽）
+const ENABLE_AGE_FILTER = true;
 
 // --------------------
 // Google News RSS URL を安全に生成
@@ -27,21 +30,21 @@ function googleNewsRssUrl(query, hl = "ja", gl = "JP", ceid = "JP:ja") {
 }
 
 // --------------------
-// RSS 定義（3社）
+// RSS 定義（3社）※日本ペイントは表記ゆらぎを広めに
 // --------------------
 const FEEDS = [
   {
     name: "関西ペイント",
     url: googleNewsRssUrl(
-      "(関西ペイント OR Kansai Paint) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment) -ネイル -絵の具 -DIY"
+      "(関西ペイント OR Kansai Paint) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment OR 自動車 OR 建築) -ネイル -絵の具 -DIY"
     )
   },
-{
-  name: "日本ペイント",
-  url: googleNewsRssUrl(
-    "(日本ペイント OR Nippon Paint OR Nippon Paint Holdings OR ニッペ) (塗料 OR コーティング OR paint OR coating OR 建築 OR 自動車 OR リフィニッシュ OR 顔料 OR pigment) -ネイル -絵の具 -DIY"
-  )
-},
+  {
+    name: "日本ペイント",
+    url: googleNewsRssUrl(
+      "(日本ペイント OR Nippon Paint OR Nippon Paint Holdings OR ニッペ) (塗料 OR コーティング OR paint OR coating OR 顔料 OR pigment OR 自動車 OR 建築 OR リフィニッシュ) -ネイル -絵の具 -DIY"
+    )
+  },
   {
     name: "BASF",
     url: googleNewsRssUrl(
@@ -50,25 +53,9 @@ const FEEDS = [
   }
 ];
 
-function sortByDateDesc(a, b) {
-  const da = Date.parse(a.pubDate || "") || 0;
-  const db = Date.parse(b.pubDate || "") || 0;
-  return db - da;
-}
-
-function normTitle(t) {
-  return (t || "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function normalizeItem(source, item) {
-  const title = (item.title || "").trim();
-  const link = (item.link || "").trim();
-  const pubDate = item.isoDate || item.pubDate || "";
-  const key = `${source}|${link || `title:${title}`}`;
-  return { key, source, title, link, pubDate };
-}
-
-// ====== 履歴の読み書き ======
+// ==============================
+// ユーティリティ
+// ==============================
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -99,21 +86,45 @@ function saveSent(sentObj) {
   fs.writeFileSync(SENT_PATH, JSON.stringify(sentObj, null, 2), "utf-8");
 }
 
+function normTitle(t) {
+  return (t || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function parseDateToISO10(d) {
+  const t = Date.parse(d || "");
+  if (Number.isNaN(t)) return null;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
 function withinMaxAge(pubDate) {
-  const t = Date.parse(pubDate || "") || 0;
-  if (!t) return true;
+  if (!ENABLE_AGE_FILTER) return true;
+  const t = Date.parse(pubDate || "");
+  if (Number.isNaN(t)) return true; // 日付が怪しい場合は通す（空にならないため）
   const cutoff = Date.now() - MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
   return t >= cutoff;
 }
 
-// --------------------
-// 会社ごとに候補を取り、既出を除外して最新N件選ぶ
-// --------------------
-async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
+function normalizeItem(source, item) {
+  const title = (item.title || "").trim();
+  const link = (item.link || "").trim();
+  const pubDate = item.isoDate || item.pubDate || "";
+  const key = `${source}|${link || `title:${title}`}`;
+  return { key, source, title, link, pubDate };
+}
+
+function sortByDateDesc(a, b) {
+  const da = Date.parse(a.pubDate || "") || 0;
+  const db = Date.parse(b.pubDate || "") || 0;
+  return db - da;
+}
+
+// ==============================
+// コア：会社ごとに取得して、"新着優先 + 足りなければ既出で埋める"
+// ==============================
+async function buildNewsJson(perCompanyLimit = 3) {
   const parser = new Parser({ timeout: 20000 });
 
   let sent = pruneSent(loadSent());
-
   const todayJst = new Date(Date.now() + 9 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
@@ -124,12 +135,15 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
     let items = [];
     try {
       const feed = await parser.parseURL(f.url);
+      const count = (feed.items || []).length;
+      console.log(`[INFO] ${f.name} items: ${count}`);
       items = (feed.items || []).map((it) => normalizeItem(f.name, it));
     } catch (e) {
       console.error(`[WARN] RSS failed: ${f.name}`, e?.message || e);
       items = [];
     }
 
+    // 会社内でキー重複を消しつつ、必要なら日付フィルタ
     const map = new Map();
     for (const it of items) {
       if (!it.title) continue;
@@ -138,48 +152,56 @@ async function fetchPerCompanyLatestAvoidSent(perCompanyLimit = 3) {
     }
     const uniq = Array.from(map.values()).sort(sortByDateDesc);
 
-const seenTitle = new Set();
-const chosen = [];
+    // まず新着（未出）だけで選ぶ → 足りない分は既出も含めて埋める
+    const seenTitle = new Set();
+    const chosen = [];
 
-// 1) まず「未出」だけで選ぶ（新着優先）
-for (const it of uniq) {
-  if (sent[it.key]) continue;
-  const t = normTitle(it.title);
-  if (seenTitle.has(t)) continue;
-  seenTitle.add(t);
-  chosen.push(it);
-  if (chosen.length >= perCompanyLimit) break;
-}
+    // 1) 新着優先
+    for (const it of uniq) {
+      if (sent[it.key]) continue;
+      const t = normTitle(it.title);
+      if (seenTitle.has(t)) continue;
+      seenTitle.add(t);
+      chosen.push(it);
+      if (chosen.length >= perCompanyLimit) break;
+    }
 
-// 2) 足りなければ「既出」も混ぜて埋める（週次でも空にならない）
-if (chosen.length < perCompanyLimit) {
-  for (const it of uniq) {
-    const t = normTitle(it.title);
-    if (seenTitle.has(t)) continue;
-    seenTitle.add(t);
-    chosen.push(it);
-    if (chosen.length >= perCompanyLimit) break;
-  }
-}
+    // 2) 足りなければ既出も混ぜる（空配列回避）
+    if (chosen.length < perCompanyLimit) {
+      for (const it of uniq) {
+        const t = normTitle(it.title);
+        if (seenTitle.has(t)) continue;
+        seenTitle.add(t);
+        chosen.push(it);
+        if (chosen.length >= perCompanyLimit) break;
+      }
+    }
 
+    // もしRSS自体が0で何も取れない場合でも、必ず配列を作る
     result[f.name] = chosen.map((it) => ({
-      date: (it.pubDate || "").slice(0, 10) || todayJst,
+      date: parseDateToISO10(it.pubDate) || todayJst,
       title: (it.title || "").trim(),
       url: (it.link || "").trim()
     }));
+
+    // 未出で選べたものだけ「既出」に記録（既出補充分まで記録すると次回さらに薄くなるため）
+    for (const it of chosen) {
+      // 既出補充分も含めて記録したいなら、下の if を外す
+      if (!sent[it.key]) sent[it.key] = todayJst;
+    }
   }
 
   saveSent(sent);
   return result;
 }
 
-// --------------------
+// ==============================
 // main
-// --------------------
+// ==============================
 async function main() {
-  const data = await fetchPerCompanyLatestAvoidSent(PER_COMPANY_LIMIT);
+  const data = await buildNewsJson(PER_COMPANY_LIMIT);
   fs.writeFileSync(OUT_PATH, JSON.stringify(data, null, 2), "utf-8");
-  console.log("OK: wrote", OUT_PATH, "companies:", Object.keys(data));
+  console.log("OK: wrote", OUT_PATH, "companies:", Object.keys(data).join(", "));
 }
 
 main().catch((e) => {
