@@ -33,12 +33,12 @@ function googleNewsRssUrl(query, hl = "ja", gl = "JP", ceid = "JP:ja") {
 // RSS 定義（3社）※日本ペイントは表記ゆらぎを広めに
 // --------------------
 const FEEDS = [
-  {
-    name: "関西ペイント",
-    url: googleNewsRssUrl(
-      "(関西ペイント OR Kansai Paint) (自動車 OR automotive OR OEM OR リフィニッシュ OR 車両) (塗料 OR coating) -市場 -調査 -レポート -ドリームニュース"
-    )
-  },
+ {
+  name: "関西ペイント",
+  url: googleNewsRssUrl(
+    '(関西ペイント OR "Kansai Paint") (automotive OR 自動車 OR OEM OR refinish OR 塗料 OR paint OR coating)'
+  )
+},
   {
     name: "日本ペイント",
     url: googleNewsRssUrl(
