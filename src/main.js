@@ -32,12 +32,17 @@ function googleNewsRssUrl(query, hl = "ja", gl = "JP", ceid = "JP:ja") {
 // - 除外語（-市場等）は一旦入れない（効きすぎて0件になりやすい）
 // --------------------
 const FEEDS = [
-  {
-    name: "関西ペイント",
-    url: googleNewsRssUrl(
-      '(関西ペイント OR "Kansai Paint") (自動車 OR automotive OR OEM OR refinish OR 車両 OR 塗料 OR paint OR coating OR コーティング)'
+ {
+  name: "関西ペイント",
+  urls: [
+    // ① 広く拾う（これが保険で効く）
+    googleNewsRssUrl('(関西ペイント OR "Kansai Paint")'),
+    // ② 自動車×塗料寄り（取れたら混ぜる）
+    googleNewsRssUrl(
+      '(関西ペイント OR "Kansai Paint") (自動車 OR automotive OR OEM OR refinish OR 塗料 OR paint OR coating OR コーティング)'
     )
-  },
+  ]
+},
   {
     name: "日本ペイント",
     url: googleNewsRssUrl(
